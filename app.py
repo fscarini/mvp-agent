@@ -98,7 +98,6 @@ async def handle_media_stream(websocket: WebSocket):
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
-                    logger.info(f"OpenAI Response Received: {response.get('type')}")
 
                     # Log OpenAI responses
                     # logger.info(f"OpenAI Response: {response}")
@@ -142,7 +141,7 @@ async def initialize_session(openai_ws):
     session_update = {
         "type": "session.update",
         "session": {
-            "turn_detection": {"type": "server_vad"},
+            "turn_detection": {"type": "client_vad"},
             "input_audio_format": "g711_ulaw",
             "output_audio_format": "g711_ulaw",
             "voice": VOICE,
