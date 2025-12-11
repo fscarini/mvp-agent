@@ -141,7 +141,14 @@ async def initialize_session(openai_ws):
     session_update = {
         "type": "session.update",
         "session": {
-            "turn_detection": {"type": "client_vad"},
+            "turn_detection": {
+                "type": "server_vad",
+                "threshold": 0.6,            # 0.3–0.6 é um range bom pra testar
+                "prefix_padding_ms": 250,    # reaproveita um pouco antes do start
+                "silence_duration_ms": 500,  # 0.5s de silêncio para encerrar turno
+                "create_response": True,     # Realtime já cria a resposta sozinho
+                "interrupt_response": True,  # permite barge-in (interromper TTS)
+            },
             "input_audio_format": "g711_ulaw",
             "output_audio_format": "g711_ulaw",
             "voice": VOICE,
