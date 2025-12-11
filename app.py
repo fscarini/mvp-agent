@@ -98,6 +98,7 @@ async def handle_media_stream(websocket: WebSocket):
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
+                    logger.info(f"OpenAI Response Received: {response.get('type')}")
 
                     # Log OpenAI responses
                     # logger.info(f"OpenAI Response: {response}")
