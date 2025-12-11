@@ -68,6 +68,7 @@ async def handle_media_stream(websocket: WebSocket):
     await websocket.accept()
 
     stream_sid = None
+    agent_speaking = False
 
     async with websockets.connect(
         AZURE_OPENAI_API_ENDPOINT,
@@ -76,63 +77,134 @@ async def handle_media_stream(websocket: WebSocket):
         await initialize_session(openai_ws)
 
         async def receive_from_twilio():
+            """
+            Recebe o áudio do Twilio (G.711 μ-law) e envia cada frame
+            para o Azure Realtime via input_audio_buffer.append.
+            """
             nonlocal stream_sid
+
             try:
                 async for message in websocket.iter_text():
                     data = json.loads(message)
-                    if data["event"] == "media":
+                    event = data.get("event")
+
+                    # Evento de início de stream
+                    if event == "start":
+                        stream_sid = data["start"]["streamSid"]
+                        logger.info(f"🔁 Twilio stream started: {stream_sid}")
+
+                    # Evento de mídia (áudio base64 μ-law)
+                    elif event == "media":
+                        payload = data["media"]["payload"]
+
                         audio_append = {
                             "type": "input_audio_buffer.append",
-                            "audio": data["media"]["payload"],
+                            "audio": payload,
                         }
+
                         await openai_ws.send(json.dumps(audio_append))
-                    elif data["event"] == "start":
-                        stream_sid = data["start"]["streamSid"]
-                        logger.info(f"Stream started with SID: {stream_sid}")
+
+                    # Evento de finalização do stream
+                    elif event == "stop":
+                        logger.info(f"🛑 Twilio stream stopped: {stream_sid}")
+                        break
+
             except WebSocketDisconnect:
-                logger.warning("WebSocket disconnected by client.")
-                if openai_ws.open:
-                    await openai_ws.close()
+                logger.info("📴 Twilio WebSocket disconnected.")
+
+            except Exception as e:
+                logger.error(f"❌ Error in receive_from_twilio: {e}")
+
 
         async def send_to_twilio():
+            """
+            Lê os eventos do Realtime (áudio, VAD, etc.) e:
+            - envia áudio de resposta para o Twilio;
+            - aplica a lógica de barge-in (response.cancel).
+            """
+            nonlocal agent_speaking, stream_sid
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
+                    ev_type = response.get("type")
 
-                    # Log OpenAI responses
-                    # logger.info(f"OpenAI Response: {response}")
+                    # 1) Logs de debug úteis
+                    if ev_type == "session.updated":
+                        logger.info(
+                            "🧩 Session config aplicada: %s",
+                            json.dumps(response.get("session", {}), indent=2),
+                        )
 
-                    if response.get("type") == "response.audio.delta" and "delta" in response:
-                        audio_payload = base64.b64encode(
-                            base64.b64decode(response["delta"])
-                        ).decode("utf-8")
-                        audio_delta = {
-                            "event": "media",
-                            "streamSid": stream_sid,
-                            "media": {"payload": audio_payload},
-                        }
-                        await websocket.send_json(audio_delta)
+                    if ev_type == "input_audio_buffer.speech_started":
+                        logger.info("🟢 [VAD] speech_started – usuário começou a falar")
 
-                    # Handle function calls for RAG
-                    if response.get("type") == "response.function_call_arguments.done":
-                        function_name = response["name"]
+                        # 🔥 LÓGICA CENTRAL DE BARGE-IN:
+                        # se o usuário começou a falar ENQUANTO a LIA fala, cancela a resposta atual
+                        if agent_speaking:
+                            logger.info("⛔ [BARGE-IN] Cancelando resposta em andamento")
+                            cancel_msg = {"type": "response.cancel"}
+                            await openai_ws.send(json.dumps(cancel_msg))
+                            agent_speaking = False
+
+                    if ev_type == "input_audio_buffer.speech_stopped":
+                        logger.info("🔴 [VAD] speech_stopped – usuário parou de falar")
+
+                    if ev_type == "input_audio_buffer.committed":
+                        logger.info("✅ [VAD] input_audio_buffer.committed – turno fechado")
+
+                    if ev_type in ("response.done", "response.completed"):
+                        logger.info("✅ [RESP] resposta concluída")
+                        agent_speaking = False
+
+                    if ev_type == "response.canceled":
+                        logger.info("⛔ [RESP] resposta cancelada")
+                        agent_speaking = False
+
+                    # 2) ÁUDIO DO MODELO → TWILIO
+                    if ev_type == "response.audio.delta" and "delta" in response:
+                        # Se está chegando áudio, o agente está falando
+                        agent_speaking = True
+
+                        if stream_sid is None:
+                            logger.warning("Recebi audio.delta sem stream_sid definido.")
+                        else:
+                            # A Azure/OpenAI manda base64 → Twilio também espera base64 μ-law
+                            # Apenas reempacotamos (mantendo o payload como base64)
+                            try:
+                                decoded = base64.b64decode(response["delta"])
+                                audio_payload = base64.b64encode(decoded).decode("utf-8")
+
+                                audio_delta = {
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {"payload": audio_payload},
+                                }
+                                await websocket.send_json(audio_delta)
+                            except Exception as e:
+                                logger.error(f"Error decoding/sending audio delta: {e}")
+
+                    # 3) Function calls (RAG, etc.) – mantém sua lógica existente aqui
+                    if ev_type == "response.function_call_arguments.done":
+                        function_name = response.get("name")
                         if function_name == "get_additional_context":
-                            query = json.loads(response["arguments"]).get("query", "")
+                            try:
+                                args = json.loads(response.get("arguments", "{}"))
+                                query = args.get("query", "")
+                            except Exception:
+                                query = ""
+
                             search_results = azure_search_rag(query)
                             logger.info(f"RAG Results: {search_results}")
-                            await send_function_output(openai_ws, response["call_id"], search_results)
+                            await send_function_output(
+                                openai_ws, response["call_id"], search_results
+                            )
 
-                    # Trigger RAG search when input is committed
-                    if response.get("type") == "input_audio_buffer.committed":
-                        query = response.get("text", "").strip()
-                        # if query:
-                        #     logger.info(f"Triggering RAG search for query: {query}")
-                        #     await trigger_rag_search(openai_ws, query)
-                        # else:
-                        #     logger.warning("Received empty query; skipping RAG search.")
+            except WebSocketDisconnect:
+                logger.info("OpenAI WebSocket disconnected.")
             except Exception as e:
                 logger.error(f"Error in send_to_twilio: {e}")
 
+        # Roda os dois fluxos em paralelo (duplex)
         await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
 
@@ -143,7 +215,7 @@ async def initialize_session(openai_ws):
         "session": {
             "turn_detection": {
                 "type": "server_vad",
-                "threshold": 0.6,            # 0.3–0.6 é um range bom pra testar
+                "threshold": 0.5,            # 0.3–0.6 é um range bom pra testar
                 "prefix_padding_ms": 250,    # reaproveita um pouco antes do start
                 "silence_duration_ms": 500,  # 0.5s de silêncio para encerrar turno
                 "create_response": True,     # Realtime já cria a resposta sozinho
