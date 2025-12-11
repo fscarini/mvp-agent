@@ -1,8 +1,10 @@
-azure-search-documents
-azure-identity
 fastapi
 uvicorn
-python-dotenv
 websockets
 twilio
-asyncio
+azure-core
+azure-search-documents
+python-dotenv
+pyaudio
+requests
+aiohttp
