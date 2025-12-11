@@ -10,24 +10,21 @@ from fastapi.websockets import WebSocketDisconnect
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
-from dotenv import load_dotenv
-from pathlib import Path
+# from dotenv import load_dotenv
+# from pathlib import Path
 
-base_dir = Path(__file__).parent
-env_path = Path('.') / '.env'
-load_dotenv(dotenv_path=env_path)
-
-print(f"Tentando ler .env de: {env_path}")
-print(f"Endpoint carregado: {os.getenv('AZURE_SEARCH_ENDPOINT')}")
+# base_dir = Path(__file__).parent
+# env_path = Path('.') / '.env'
+# load_dotenv(dotenv_path=env_path)
 
 # Configuration
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_API_ENDPOINT = os.getenv("AZURE_OPENAI_API_ENDPOINT")
-AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
-AZURE_SEARCH_KEY = os.getenv("AZURE_SEARCH_KEY")
-AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX")
-AZURE_SEARCH_SEMANTIC_CONFIGURATION = os.getenv("AZURE_SEARCH_SEMANTIC_CONFIGURATION")
-PORT = int(os.getenv("PORT", 5050))
+AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_API_ENDPOINT = os.environ.get("AZURE_OPENAI_API_ENDPOINT")
+AZURE_SEARCH_ENDPOINT = os.environ.get("AZURE_SEARCH_ENDPOINT")
+AZURE_SEARCH_KEY = os.environ.get("AZURE_SEARCH_KEY")
+AZURE_SEARCH_INDEX = os.environ.get("AZURE_SEARCH_INDEX")
+AZURE_SEARCH_SEMANTIC_CONFIGURATION = os.environ.get("AZURE_SEARCH_SEMANTIC_CONFIGURATION")
+PORT = int(os.environ.get("PORT", 5050))
 VOICE = "alloy"
 
 # Setup logging
