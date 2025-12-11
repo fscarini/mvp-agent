@@ -56,11 +56,11 @@ COPY app.py .
 USER appuser
 
 # Expõe a porta
-EXPOSE 8000
+EXPOSE 5050
 
 # Healthcheck que usa a rota de teste do seu FastAPI
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/ || exit 1
 
 # Comando de execução: Roda o FastAPI (objeto 'app' no arquivo 'app.py')
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5050"]
