@@ -4,6 +4,8 @@ import base64
 import asyncio
 import websockets
 import logging
+import math
+import struct # import novo, embora não usado em g711, é bom ter se fosse PCM
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.websockets import WebSocketDisconnect
@@ -69,6 +71,21 @@ async def handle_media_stream(websocket: WebSocket):
 
     stream_sid = None
     agent_speaking = False
+    
+    # 🌟 INÍCIO DO PATCH: Variável de controle e Função de Silêncio
+    cutting_playback = False
+
+    def generate_silence_g711_ulaw(duration_ms=200):
+        """
+        Gera silêncio μ-law (G.711) para enviar ao Twilio.
+        duration_ms controla quantos ms de silêncio queremos enviar.
+        """
+        # 8kHz, 1 byte por amostra -> 8 amostras por ms
+        samples = int(8 * duration_ms)
+        # 0xFF é o byte de silêncio (zero amplitude) em μ-law
+        buf = bytes([0xFF]) * samples
+        return base64.b64encode(buf).decode("utf-8")
+    # 🌟 FIM DO PATCH
 
     async with websockets.connect(
         AZURE_OPENAI_API_ENDPOINT,
@@ -122,7 +139,9 @@ async def handle_media_stream(websocket: WebSocket):
             - envia áudio de resposta para o Twilio;
             - aplica a lógica de barge-in (response.cancel).
             """
-            nonlocal agent_speaking, stream_sid
+            # 🌟 INÍCIO DO PATCH: Gerenciamento das flags no escopo
+            nonlocal agent_speaking, stream_sid, cutting_playback
+            # 🌟 FIM DO PATCH
             try:
                 async for openai_message in openai_ws:
                     response = json.loads(openai_message)
@@ -135,16 +154,35 @@ async def handle_media_stream(websocket: WebSocket):
                             json.dumps(response.get("session", {}), indent=2),
                         )
 
+                    # 🌟 INÍCIO DO PATCH: Lógica de Cancelamento e Flush (ETAPA B)
                     if ev_type == "input_audio_buffer.speech_started":
                         logger.info("🟢 [VAD] speech_started – usuário começou a falar")
 
                         # 🔥 LÓGICA CENTRAL DE BARGE-IN:
-                        # se o usuário começou a falar ENQUANTO a LIA fala, cancela a resposta atual
                         if agent_speaking:
                             logger.info("⛔ [BARGE-IN] Cancelando resposta em andamento")
+
+                            # 1) Cancela a resposta do modelo
                             cancel_msg = {"type": "response.cancel"}
                             await openai_ws.send(json.dumps(cancel_msg))
+
+                            # 2) Marca que estamos cortando o TTS e que o agente não está falando
+                            cutting_playback = True
                             agent_speaking = False
+
+                            # 3) Envia silêncio para o Twilio para sobrescrever o áudio já enfileirado
+                            if stream_sid:
+                                silence_payload = generate_silence_g711_ulaw(200) # 200ms de silêncio por frame
+                                for _ in range(6):  # Envia ~1.2 segundos de silêncio para limpar o buffer
+                                    try:
+                                        await websocket.send_json({
+                                            "event": "media",
+                                            "streamSid": stream_sid,
+                                            "media": {"payload": silence_payload}
+                                        })
+                                    except Exception as e:
+                                        logger.error(f"Erro enviando silêncio para Twilio: {e}")
+                    # 🌟 FIM DO PATCH
 
                     if ev_type == "input_audio_buffer.speech_stopped":
                         logger.info("🔴 [VAD] speech_stopped – usuário parou de falar")
@@ -152,16 +190,28 @@ async def handle_media_stream(websocket: WebSocket):
                     if ev_type == "input_audio_buffer.committed":
                         logger.info("✅ [VAD] input_audio_buffer.committed – turno fechado")
 
+                    # 🌟 INÍCIO DO PATCH: Reset da flag (ETAPA D)
                     if ev_type in ("response.done", "response.completed"):
                         logger.info("✅ [RESP] resposta concluída")
                         agent_speaking = False
-
+                        cutting_playback = False # Reseta
+                    
                     if ev_type == "response.canceled":
                         logger.info("⛔ [RESP] resposta cancelada")
                         agent_speaking = False
+                        cutting_playback = False # Reseta
+                    # 🌟 FIM DO PATCH
 
                     # 2) ÁUDIO DO MODELO → TWILIO
                     if ev_type == "response.audio.delta" and "delta" in response:
+                        
+                        # 🌟 INÍCIO DO PATCH: Descarte de deltas (ETAPA C)
+                        # Se estamos cortando a reprodução devido a barge-in, ignore todo audio.delta
+                        if cutting_playback:
+                            logger.info("🔇 Descartando delta de áudio (corte ativo)")
+                            continue
+                        # 🌟 FIM DO PATCH
+                        
                         # Se está chegando áudio, o agente está falando
                         agent_speaking = True
 
